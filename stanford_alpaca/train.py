@@ -50,7 +50,8 @@ class ModelArguments:
 @dataclass
 class DataArguments:
     data_path: str = field(default=None, metadata={"help": "Path to the training data."})
-
+    train_wo_ignore_index: bool = field(default = False, metadata={'help': 'do not ignore the index of the instructions while training the models'})
+    train_wo_outputs: bool = field(default = False, metadata={'help': 'some instances in the data will not have the output'})
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
@@ -60,7 +61,6 @@ class TrainingArguments(transformers.TrainingArguments):
         default=512,
         metadata={"help": "Maximum sequence length. Sequences will be right padded (and possibly truncated)."},
     )
-
 
 def smart_tokenizer_and_embedding_resize(
     special_tokens_dict: Dict,
@@ -113,21 +113,27 @@ def preprocess(
     sources: Sequence[str],
     targets: Sequence[str],
     tokenizer: transformers.PreTrainedTokenizer,
+    data_args
 ) -> Dict:
     """Preprocess the data by tokenizing."""
     examples = [s + t for s, t in zip(sources, targets)]
     examples_tokenized, sources_tokenized = [_tokenize_fn(strings, tokenizer) for strings in (examples, sources)]
     input_ids = examples_tokenized["input_ids"]
     labels = copy.deepcopy(input_ids)
-    for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
-        label[:source_len] = IGNORE_INDEX
+    if (not data_args.train_wo_ignore_index):
+        for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
+            label[:source_len] = IGNORE_INDEX
+    if data_args.train_wo_outputs:
+        for label, source_len, example_len in zip(labels, sources_tokenized["input_ids_lens"], examples_tokenized["input_ids_lens"]):
+            if example_len == source_len + 1: ## example has just eos token extra
+                label[-1] = IGNORE_INDEX ## don't compute loss over eos token when there is no output
     return dict(input_ids=input_ids, labels=labels)
 
 
 class SupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
 
-    def __init__(self, data_path: str, tokenizer: transformers.PreTrainedTokenizer):
+    def __init__(self, data_path: str, tokenizer: transformers.PreTrainedTokenizer, data_args):
         super(SupervisedDataset, self).__init__()
         logging.warning("Loading data...")
         list_data_dict = utils.jload(data_path)
@@ -138,10 +144,11 @@ class SupervisedDataset(Dataset):
             prompt_input.format_map(example) if example.get("input", "") != "" else prompt_no_input.format_map(example)
             for example in list_data_dict
         ]
-        targets = [f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
+        # targets = [f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
+        targets = [f"{tokenizer.eos_token}" if not 'output' in example else f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
 
         logging.warning("Tokenizing inputs... This may take some time...")
-        data_dict = preprocess(sources, targets, tokenizer)
+        data_dict = preprocess(sources, targets, tokenizer, data_args)
 
         self.input_ids = data_dict["input_ids"]
         self.labels = data_dict["labels"]
@@ -174,7 +181,7 @@ class DataCollatorForSupervisedDataset(object):
 
 def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, data_args) -> Dict:
     """Make dataset and collator for supervised fine-tuning."""
-    train_dataset = SupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path)
+    train_dataset = SupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, data_args = data_args)
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
     return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
 
