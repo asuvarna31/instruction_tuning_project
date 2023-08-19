@@ -186,9 +186,9 @@ def train():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     
-    # if torch.distributed.get_rank() == 0:
-    #     wandb.init(project = "instruction tuning")
-    #     wandb.run.name = training_args.run_name
+    if torch.distributed.get_rank() == 0:
+        wandb.init(project = "instruction tuning")
+        wandb.run.name = training_args.run_name
 
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
