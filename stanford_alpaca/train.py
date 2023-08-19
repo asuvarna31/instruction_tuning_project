@@ -20,6 +20,7 @@ from typing import Dict, Optional, Sequence
 import torch
 import transformers
 import utils
+import wandb
 from torch.utils.data import Dataset
 from transformers import Trainer
 
@@ -51,7 +52,6 @@ class ModelArguments:
 class DataArguments:
     data_path: str = field(default=None, metadata={"help": "Path to the training data."})
     train_wo_ignore_index: bool = field(default = False, metadata={'help': 'do not ignore the index of the instructions while training the models'})
-    train_wo_outputs: bool = field(default = False, metadata={'help': 'some instances in the data will not have the output'})
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
@@ -61,6 +61,7 @@ class TrainingArguments(transformers.TrainingArguments):
         default=512,
         metadata={"help": "Maximum sequence length. Sequences will be right padded (and possibly truncated)."},
     )
+    run_name: str = field(default = "test", metadata = {'help': 'wandb run name'})
 
 def smart_tokenizer_and_embedding_resize(
     special_tokens_dict: Dict,
@@ -123,10 +124,6 @@ def preprocess(
     if (not data_args.train_wo_ignore_index):
         for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
             label[:source_len] = IGNORE_INDEX
-    if data_args.train_wo_outputs:
-        for label, source_len, example_len in zip(labels, sources_tokenized["input_ids_lens"], examples_tokenized["input_ids_lens"]):
-            if example_len == source_len + 1: ## example has just eos token extra
-                label[-1] = IGNORE_INDEX ## don't compute loss over eos token when there is no output
     return dict(input_ids=input_ids, labels=labels)
 
 
@@ -146,7 +143,6 @@ class SupervisedDataset(Dataset):
         ]
         # targets = [f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
         targets = [f"{tokenizer.eos_token}" if not 'output' in example else f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
-
         logging.warning("Tokenizing inputs... This may take some time...")
         data_dict = preprocess(sources, targets, tokenizer, data_args)
 
@@ -189,6 +185,10 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, dat
 def train():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    
+    # if torch.distributed.get_rank() == 0:
+    #     wandb.init(project = "instruction tuning")
+    #     wandb.run.name = training_args.run_name
 
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
